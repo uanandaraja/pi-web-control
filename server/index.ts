@@ -302,8 +302,8 @@ function parseSocketMessage(message: string | BufferSource): JsonObject | null {
   return value as JsonObject;
 }
 
-async function listWorkspaceSessions(): Promise<JsonObject[]> {
-  const sessions = await SessionManager.list(config.workspace, config.sessionDir);
+async function listWorkspaceSessions(workspace: string): Promise<JsonObject[]> {
+  const sessions = await SessionManager.list(workspace, config.sessionDir);
   return sessions.slice(0, 100).map((session) => ({
     path: session.path,
     id: session.id,
@@ -397,13 +397,16 @@ const server = Bun.serve<SocketData>({
           return;
         }
         if (message.type === "bridge.list_sessions") {
-          const sessions = await listWorkspaceSessions();
+          const workspace = message.workspace === undefined
+            ? config.workspace
+            : await resolveWorkspacePath(message.workspace);
+          const sessions = await listWorkspaceSessions(workspace);
           send(socket, {
             type: "bridge_response",
             command: "list_sessions",
             requestId,
             success: true,
-            data: { sessions },
+            data: { workspace, sessions },
           });
           return;
         }

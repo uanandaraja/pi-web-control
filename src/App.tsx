@@ -1,4 +1,4 @@
-import { List, Play, WarningCircle, X } from "@phosphor-icons/react";
+import { CircleNotch, List, Play, WarningCircle, X } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Composer } from "./components/Composer";
 import { ExtensionDialog } from "./components/ExtensionDialog";
@@ -49,6 +49,12 @@ interface Notice {
   message: string;
 }
 
+interface PendingSessionOpen {
+  workspace: string;
+  session: SessionSummary;
+  switchSent: boolean;
+}
+
 const WORKSPACES_STORAGE_KEY = "pi-web-workspaces";
 
 function loadStoredWorkspaces(): string[] {
@@ -75,6 +81,11 @@ function isModelInfo(value: unknown): value is ModelInfo {
   return typeof value === "object" && value !== null &&
     "id" in value && typeof value.id === "string" &&
     "provider" in value && typeof value.provider === "string";
+}
+
+function isSessionSummary(value: unknown): value is SessionSummary {
+  return typeof value === "object" && value !== null &&
+    "path" in value && typeof value.path === "string";
 }
 
 function upsertMessage(entries: TimelineEntry[], message: AgentMessage, streaming: boolean): TimelineEntry[] {
@@ -265,7 +276,9 @@ export function App() {
   const [rpcState, setRpcState] = useState<RpcState | null>(null);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsByWorkspace, setSessionsByWorkspace] = useState<Record<string, SessionSummary[]>>({});
+  const [sessionListsLoading, setSessionListsLoading] = useState<string[]>([]);
+  const [pendingSession, setPendingSession] = useState<PendingSessionOpen | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>(loadStoredWorkspaces);
   const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
@@ -283,6 +296,13 @@ export function App() {
   const [syncRevision, setSyncRevision] = useState(0);
   const [fullSyncRevision, setFullSyncRevision] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  const sessionCacheRef = useRef<Record<string, SessionSummary[]>>({});
+  const sessionLoadingRef = useRef(new Set<string>());
+  const sessionRequestWorkspacesRef = useRef(new Map<string, string>());
+  const awaitingSessionMessagesRef = useRef(false);
+  const scrollToBottomRef = useRef(false);
+
+  sessionCacheRef.current = sessionsByWorkspace;
 
   useEffect(() => {
     applyTheme(themeId, appearance);
@@ -331,6 +351,8 @@ export function App() {
       if (event.command === "set_workspace") {
         setWorkspaceSwitching(false);
         if (event.success === false) {
+          awaitingSessionMessagesRef.current = false;
+          setPendingSession(null);
           setNotice({ tone: "error", message: eventString(event, "error") ?? "Could not change workspace" });
           return;
         }
@@ -342,20 +364,37 @@ export function App() {
         setTimeline([]);
         setRpcState(null);
         setStats(null);
-        setSessions([]);
         setFullSyncRevision((value) => value + 1);
         return;
       }
       if (event.command === "list_sessions") {
+        const requestId = eventString(event, "requestId");
+        const requestedWorkspace = requestId ? sessionRequestWorkspacesRef.current.get(requestId) : undefined;
+        if (requestId) sessionRequestWorkspacesRef.current.delete(requestId);
+
+        const data = event.data;
+        const resolvedWorkspace = typeof data === "object" && data !== null && "workspace" in data && typeof data.workspace === "string"
+          ? data.workspace
+          : undefined;
+        if (requestedWorkspace) sessionLoadingRef.current.delete(requestedWorkspace);
+        if (resolvedWorkspace) sessionLoadingRef.current.delete(resolvedWorkspace);
+        setSessionListsLoading([...sessionLoadingRef.current]);
+
         if (event.success === false) {
           setNotice({ tone: "warning", message: eventString(event, "error") ?? "Could not load previous sessions" });
           return;
         }
-        const data = event.data;
         if (typeof data === "object" && data !== null && "sessions" in data && Array.isArray(data.sessions)) {
-          setSessions(data.sessions.filter((session): session is SessionSummary =>
-            typeof session === "object" && session !== null && "path" in session && typeof session.path === "string",
-          ));
+          const cacheWorkspace = resolvedWorkspace ?? requestedWorkspace;
+          if (cacheWorkspace) {
+            const sessions = data.sessions.filter(isSessionSummary);
+            setSessionsByWorkspace((current) => {
+              const next = { ...current, [cacheWorkspace]: sessions };
+              sessionCacheRef.current = next;
+              return next;
+            });
+            setWorkspaces((current) => rememberWorkspace(current, cacheWorkspace));
+          }
         }
         return;
       }
@@ -368,6 +407,10 @@ export function App() {
       if (event.success === false) {
         if (event.command === "set_model" || event.command === "set_thinking_level") {
           setSyncRevision((value) => value + 1);
+        }
+        if (event.command === "switch_session" || (event.command === "get_messages" && awaitingSessionMessagesRef.current)) {
+          awaitingSessionMessagesRef.current = false;
+          setPendingSession(null);
         }
         setNotice({ tone: "error", message: eventString(event, "error") ?? `${event.command ?? "Command"} failed` });
         return;
@@ -391,7 +434,12 @@ export function App() {
         setSyncRevision((value) => value + 1);
       }
       if (event.command === "get_messages" && typeof data === "object" && data !== null && "messages" in data && Array.isArray(data.messages)) {
+        if (awaitingSessionMessagesRef.current) scrollToBottomRef.current = true;
         setTimeline(historyTimeline(data.messages.filter(isAgentMessage)));
+        if (awaitingSessionMessagesRef.current) {
+          awaitingSessionMessagesRef.current = false;
+          setPendingSession(null);
+        }
       }
       if (event.command === "new_session") {
         setTimeline([]);
@@ -401,8 +449,11 @@ export function App() {
       if (event.command === "switch_session") {
         const cancelled = typeof data === "object" && data !== null && "cancelled" in data && data.cancelled === true;
         if (cancelled) {
+          awaitingSessionMessagesRef.current = false;
+          setPendingSession(null);
           setNotice({ tone: "info", message: "Session switch was cancelled" });
         } else {
+          awaitingSessionMessagesRef.current = true;
           setTimeline([]);
           setStats(null);
           setFullSyncRevision((value) => value + 1);
@@ -467,6 +518,22 @@ export function App() {
 
   const { status: connectionStatus, send, reconnect } = usePiSocket({ onEvent });
 
+  const requestWorkspaceSessions = useCallback((workspace: string, force = false): void => {
+    const path = workspace.trim();
+    if (!path || (!force && Object.hasOwn(sessionCacheRef.current, path)) || sessionLoadingRef.current.has(path)) return;
+
+    const requestId = `sessions-${crypto.randomUUID()}`;
+    sessionLoadingRef.current.add(path);
+    sessionRequestWorkspacesRef.current.set(requestId, path);
+    setSessionListsLoading([...sessionLoadingRef.current]);
+
+    if (!send({ id: requestId, type: "bridge.list_sessions", workspace: path })) {
+      sessionRequestWorkspacesRef.current.delete(requestId);
+      sessionLoadingRef.current.delete(path);
+      setSessionListsLoading([...sessionLoadingRef.current]);
+    }
+  }, [send]);
+
   useEffect(() => {
     if (!authRequired || connectionStatus !== "open" || authenticated) return;
     const storedToken = sessionStorage.getItem("pi-web-token");
@@ -484,41 +551,62 @@ export function App() {
   useEffect(() => {
     if (connectionStatus === "open") return;
     setWorkspaceSwitching(false);
+    setPendingSession(null);
+    awaitingSessionMessagesRef.current = false;
+    sessionLoadingRef.current.clear();
+    sessionRequestWorkspacesRef.current.clear();
+    setSessionListsLoading([]);
   }, [connectionStatus]);
 
   useEffect(() => {
-    if (connectionStatus !== "open" || !authenticated) return;
-    send({ id: `sessions-${crypto.randomUUID()}`, type: "bridge.list_sessions" });
-  }, [authenticated, connectionStatus, send]);
-
-  useEffect(() => {
-    if (connectionStatus !== "open" || !authenticated || bridge.status !== "running") return;
+    if (connectionStatus !== "open" || !authenticated || bridge.status !== "running" || !bridge.workspace) return;
     send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
     send({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
     send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
     send({ id: `models-${crypto.randomUUID()}`, type: "get_available_models" });
-    send({ id: `sessions-${crypto.randomUUID()}`, type: "bridge.list_sessions" });
-  }, [authenticated, bridge.pid, bridge.status, connectionStatus, send]);
+    requestWorkspaceSessions(bridge.workspace, true);
+  }, [authenticated, bridge.pid, bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, send]);
 
   useEffect(() => {
     if (syncRevision === 0 || connectionStatus !== "open" || bridge.status !== "running") return;
     send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
     send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
-  }, [bridge.status, connectionStatus, send, syncRevision]);
+    if (bridge.workspace) requestWorkspaceSessions(bridge.workspace, true);
+  }, [bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, send, syncRevision]);
 
   useEffect(() => {
     if (fullSyncRevision === 0 || connectionStatus !== "open" || bridge.status !== "running") return;
     send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
     send({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
     send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
-    send({ id: `sessions-${crypto.randomUUID()}`, type: "bridge.list_sessions" });
-  }, [bridge.status, connectionStatus, fullSyncRevision, send]);
+    if (bridge.workspace) requestWorkspaceSessions(bridge.workspace, true);
+  }, [bridge.status, bridge.workspace, connectionStatus, fullSyncRevision, requestWorkspaceSessions, send]);
+
+  useEffect(() => {
+    if (!pendingSession || pendingSession.switchSent || workspaceSwitching ||
+      connectionStatus !== "open" || !authenticated || bridge.status !== "running" ||
+      bridge.workspace !== pendingSession.workspace) return;
+
+    const sent = send({ id: crypto.randomUUID(), type: "switch_session", sessionPath: pendingSession.session.path });
+    if (!sent) {
+      setPendingSession(null);
+      setNotice({ tone: "error", message: "Bridge disconnected before the session could open" });
+      return;
+    }
+    setPendingSession((current) => current?.session.path === pendingSession.session.path
+      ? { ...current, switchSent: true }
+      : current);
+  }, [authenticated, bridge.status, bridge.workspace, connectionStatus, pendingSession, send, workspaceSwitching]);
 
   useEffect(() => {
     const feed = feedRef.current;
     if (!feed) return;
+    const forceBottom = scrollToBottomRef.current;
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 180;
-    if (nearBottom) feed.scrollTo({ top: feed.scrollHeight, behavior: rpcState?.isStreaming ? "instant" : "smooth" });
+    if (forceBottom || nearBottom) {
+      feed.scrollTo({ top: feed.scrollHeight, behavior: forceBottom || rpcState?.isStreaming ? "instant" : "smooth" });
+      scrollToBottomRef.current = false;
+    }
   }, [rpcState?.isStreaming, timeline]);
 
   function authenticate(event: React.FormEvent): void {
@@ -530,11 +618,12 @@ export function App() {
     send({ type: "bridge.auth", token: trimmed });
   }
 
-  function selectWorkspace(path: string): void {
-    if (path === bridge.workspace || workspaceSwitching) return;
+  function selectWorkspace(path: string): boolean {
+    if (path === bridge.workspace) return true;
+    if (workspaceSwitching) return false;
     if (rpcState?.isStreaming) {
-      setNotice({ tone: "info", message: "Wait for the current run to finish before changing workspace" });
-      return;
+      setNotice({ tone: "info", message: "Wait for the current run to finish before opening a session in another workspace" });
+      return false;
     }
     setWorkspaceSwitching(true);
     const sent = send({ id: crypto.randomUUID(), type: "bridge.set_workspace", workspace: path });
@@ -542,6 +631,17 @@ export function App() {
       setWorkspaceSwitching(false);
       setNotice({ tone: "error", message: "Bridge disconnected before the workspace could change" });
     }
+    return sent;
+  }
+
+  function selectSession(workspace: string, session: SessionSummary): void {
+    if (pendingSession || (workspace === bridge.workspace && session.path === rpcState?.sessionFile)) return;
+    if (bridge.status !== "running") {
+      setNotice({ tone: "info", message: "Start Pi before opening a saved session" });
+      return;
+    }
+    setPendingSession({ workspace, session, switchSent: false });
+    if (!selectWorkspace(workspace)) setPendingSession(null);
   }
 
   const canSend = connectionStatus === "open" && authenticated && bridge.status === "running";
@@ -570,11 +670,13 @@ export function App() {
         workspaces={workspaces}
         workspaceSwitching={workspaceSwitching}
         rpcState={rpcState}
-        sessions={sessions}
+        sessionsByWorkspace={sessionsByWorkspace}
+        sessionListsLoading={sessionListsLoading}
+        openingSessionPath={pendingSession?.session.path}
         onClose={closeSidebar}
-        onSelectSession={(session) => {
+        onSelectSession={(workspace, session) => {
           setSidebarOpen(false);
-          send({ id: crypto.randomUUID(), type: "switch_session", sessionPath: session.path });
+          selectSession(workspace, session);
         }}
         onNewSession={() => send({ id: crypto.randomUUID(), type: "new_session" })}
         onRestart={() => send({ id: crypto.randomUUID(), type: "bridge.restart" })}
@@ -582,8 +684,8 @@ export function App() {
           setSidebarOpen(false);
           setSettingsOpen(true);
         }}
-        onAddWorkspace={selectWorkspace}
-        onSelectWorkspace={selectWorkspace}
+        onAddWorkspace={requestWorkspaceSessions}
+        onToggleWorkspace={requestWorkspaceSessions}
       />
 
       <main className="main-panel">
@@ -624,6 +726,12 @@ export function App() {
         ) : null}
 
         <div className="feed" ref={feedRef}>
+          {pendingSession ? (
+            <div className="session-opening-status" role="status">
+              <CircleNotch className="spin" size={15} />
+              Opening session…
+            </div>
+          ) : null}
           <div className="feed-inner">
             {timeline.length === 0 ? (
               <section className="empty-state">

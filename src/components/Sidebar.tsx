@@ -1,12 +1,14 @@
 import {
   ArrowRight,
   ArrowsClockwise,
+  CaretRight,
+  CircleNotch,
   FolderSimple,
   GearSix,
   Plus,
   X,
 } from "@phosphor-icons/react";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { relativeSessionTime, sessionTitle } from "../lib/sessions";
 import type { BridgeStatus, ConnectionStatus, RpcState, SessionSummary } from "../types";
 
@@ -18,14 +20,16 @@ interface SidebarProps {
   workspaces: string[];
   workspaceSwitching: boolean;
   rpcState: RpcState | null;
-  sessions: SessionSummary[];
+  sessionsByWorkspace: Record<string, SessionSummary[]>;
+  sessionListsLoading: string[];
+  openingSessionPath?: string;
   onClose: () => void;
-  onSelectSession: (session: SessionSummary) => void;
+  onSelectSession: (workspace: string, session: SessionSummary) => void;
   onNewSession: () => void;
   onRestart: () => void;
   onOpenSettings: () => void;
   onAddWorkspace: (path: string) => void;
-  onSelectWorkspace: (path: string) => void;
+  onToggleWorkspace: (path: string) => void;
 }
 
 function basename(path?: string): string {
@@ -34,6 +38,7 @@ function basename(path?: string): string {
 }
 
 const COLLAPSED_SESSION_COUNT = 5;
+const workspaceCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function Sidebar({
   open,
@@ -43,24 +48,36 @@ export function Sidebar({
   workspaces,
   workspaceSwitching,
   rpcState,
-  sessions,
+  sessionsByWorkspace,
+  sessionListsLoading,
+  openingSessionPath,
   onClose,
   onSelectSession,
   onNewSession,
   onRestart,
   onOpenSettings,
   onAddWorkspace,
-  onSelectWorkspace,
+  onToggleWorkspace,
 }: SidebarProps) {
   const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [workspacePath, setWorkspacePath] = useState("");
-  const [showAllSessions, setShowAllSessions] = useState(false);
-  const workspaceControlsDisabled = connectionStatus !== "open" || workspaceSwitching || rpcState?.isStreaming === true;
-  const visibleSessions = showAllSessions ? sessions : sessions.slice(0, COLLAPSED_SESSION_COUNT);
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(() => new Set());
+  const [showAllSessions, setShowAllSessions] = useState<Set<string>>(() => new Set());
+  const workspaceControlsDisabled = connectionStatus !== "open" || workspaceSwitching;
+  const sortedWorkspaces = useMemo(() => [...workspaces].sort((left, right) =>
+    workspaceCollator.compare(basename(left), basename(right)) || workspaceCollator.compare(left, right)
+  ), [workspaces]);
 
   useEffect(() => {
-    setShowAllSessions(false);
-  }, [workspace]);
+    if (!workspace) return;
+    setExpandedWorkspaces((current) => {
+      if (current.has(workspace)) return current;
+      const next = new Set(current);
+      next.add(workspace);
+      return next;
+    });
+    onToggleWorkspace(workspace);
+  }, [onToggleWorkspace, workspace]);
 
   function submitWorkspace(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -69,6 +86,26 @@ export function Sidebar({
     onAddWorkspace(path);
     setWorkspacePath("");
     setAddingWorkspace(false);
+  }
+
+  function toggleWorkspace(path: string): void {
+    const expanding = !expandedWorkspaces.has(path);
+    setExpandedWorkspaces((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    if (expanding) onToggleWorkspace(path);
+  }
+
+  function toggleAllSessions(path: string): void {
+    setShowAllSessions((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   }
 
   return (
@@ -132,54 +169,74 @@ export function Sidebar({
                   setAddingWorkspace(false);
                 }}
               />
-              <button type="submit" disabled={!workspacePath.trim()} aria-label="Use workspace">
+              <button type="submit" disabled={!workspacePath.trim()} aria-label="Add workspace">
                 <ArrowRight size={13} weight="bold" />
               </button>
             </form>
           ) : null}
           <div className="workspace-list">
-            {workspaces.map((path) => {
+            {sortedWorkspaces.map((path) => {
               const activeWorkspace = path === workspace;
+              const expanded = expandedWorkspaces.has(path);
+              const sessions = sessionsByWorkspace[path];
+              const loading = sessionListsLoading.includes(path);
+              const showAll = showAllSessions.has(path);
+              const visibleSessions = showAll ? sessions : sessions?.slice(0, COLLAPSED_SESSION_COUNT);
+
               return (
                 <div className={`workspace-group ${activeWorkspace ? "active" : ""}`} key={path}>
                   <button
                     className={`workspace-row ${activeWorkspace ? "active" : ""}`}
                     type="button"
-                    disabled={workspaceControlsDisabled}
                     aria-current={activeWorkspace ? "true" : undefined}
-                    onClick={() => activeWorkspace ? undefined : onSelectWorkspace(path)}
+                    aria-expanded={expanded}
+                    onClick={() => toggleWorkspace(path)}
                     title={path}
                   >
+                    <CaretRight className={`workspace-chevron ${expanded ? "expanded" : ""}`} size={11} weight="bold" />
                     <FolderSimple size={15} />
                     <strong>{basename(path)}</strong>
+                    {loading ? <CircleNotch className="spin workspace-loading-icon" size={13} aria-label="Loading sessions" /> : null}
                   </button>
-                  {activeWorkspace ? (
+                  {expanded ? (
                     <div className="sidebar-session-list">
-                      {sessions.length > 0 ? visibleSessions.map((session) => {
-                        const activeSession = session.path === rpcState?.sessionFile;
+                      {sessions === undefined ? (
+                        <div className="sidebar-loading-sessions" role="status">
+                          <CircleNotch className="spin" size={12} />
+                          Loading sessions…
+                        </div>
+                      ) : sessions.length > 0 ? visibleSessions?.map((session) => {
+                        const activeSession = activeWorkspace && session.path === rpcState?.sessionFile;
+                        const opening = session.path === openingSessionPath;
                         return (
                           <button
-                            className={`sidebar-session-row ${activeSession ? "active" : ""}`}
+                            className={`sidebar-session-row ${activeSession ? "active" : ""} ${opening ? "loading" : ""}`}
                             key={session.path}
                             type="button"
                             aria-current={activeSession ? "page" : undefined}
-                            onClick={() => activeSession ? undefined : onSelectSession(session)}
+                            aria-busy={opening || undefined}
+                            disabled={Boolean(openingSessionPath) && !opening}
+                            onClick={() => activeSession || opening ? undefined : onSelectSession(path, session)}
                             title={sessionTitle(session)}
                           >
                             <span>{sessionTitle(session)}</span>
-                            <time className="tabular" dateTime={session.modified}>{relativeSessionTime(session.modified)}</time>
+                            {opening ? (
+                              <CircleNotch className="spin session-loading-icon" size={12} aria-label="Opening session" />
+                            ) : (
+                              <time className="tabular" dateTime={session.modified}>{relativeSessionTime(session.modified)}</time>
+                            )}
                           </button>
                         );
                       }) : (
                         <div className="sidebar-empty-sessions">No saved sessions</div>
                       )}
-                      {sessions.length > COLLAPSED_SESSION_COUNT ? (
+                      {sessions && sessions.length > COLLAPSED_SESSION_COUNT ? (
                         <button
                           className="sidebar-show-more"
                           type="button"
-                          onClick={() => setShowAllSessions((current) => !current)}
+                          onClick={() => toggleAllSessions(path)}
                         >
-                          {showAllSessions ? "Show less" : "Show more"}
+                          {showAll ? "Show less" : "Show more"}
                         </button>
                       ) : null}
                     </div>
