@@ -13,6 +13,7 @@ import type {
   BridgeStatus,
   ExtensionRequest,
   ModelInfo,
+  PromptSubmission,
   RpcState,
   SessionSummary,
   ServerEvent,
@@ -36,6 +37,24 @@ type TimelineEntry =
 interface Notice {
   tone: "warning" | "error" | "info";
   message: string;
+}
+
+const WORKSPACES_STORAGE_KEY = "pi-web-workspaces";
+
+function loadStoredWorkspaces(): string[] {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(WORKSPACES_STORAGE_KEY) ?? "[]");
+    return Array.isArray(value)
+      ? value.filter((path): path is string => typeof path === "string" && path.length > 0).slice(0, 12)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberWorkspace(workspaces: string[], workspace: string): string[] {
+  if (workspaces.includes(workspace)) return workspaces;
+  return [...workspaces.slice(0, 11), workspace];
 }
 
 function isAgentMessage(value: unknown): value is AgentMessage {
@@ -237,6 +256,8 @@ export function App() {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<string[]>(loadStoredWorkspaces);
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [extensionRequest, setExtensionRequest] = useState<ExtensionRequest | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -269,12 +290,14 @@ export function App() {
     }
     if (event.type === "bridge_status") {
       setAuthenticated(true);
+      const workspace = eventString(event, "workspace");
       setBridge({
         status: (event.status as BridgeStatus) ?? "stopped",
-        workspace: eventString(event, "workspace"),
+        workspace,
         pid: typeof event.pid === "number" ? event.pid : undefined,
         message: eventString(event, "message"),
       });
+      if (workspace) setWorkspaces((current) => rememberWorkspace(current, workspace));
       if (event.status === "error") {
         setNotice({ tone: "error", message: eventString(event, "message") ?? "Pi failed to start" });
       }
@@ -285,6 +308,24 @@ export function App() {
       return;
     }
     if (event.type === "bridge_response") {
+      if (event.command === "set_workspace") {
+        setWorkspaceSwitching(false);
+        if (event.success === false) {
+          setNotice({ tone: "error", message: eventString(event, "error") ?? "Could not change workspace" });
+          return;
+        }
+        const data = event.data;
+        const workspace = typeof data === "object" && data !== null && "workspace" in data && typeof data.workspace === "string"
+          ? data.workspace
+          : undefined;
+        if (workspace) setWorkspaces((current) => rememberWorkspace(current, workspace));
+        setTimeline([]);
+        setRpcState(null);
+        setStats(null);
+        setSessions([]);
+        setFullSyncRevision((value) => value + 1);
+        return;
+      }
       if (event.command === "list_sessions") {
         if (event.success === false) {
           setNotice({ tone: "warning", message: eventString(event, "error") ?? "Could not load previous sessions" });
@@ -413,6 +454,19 @@ export function App() {
   }, [authRequired, authenticated, connectionStatus, send]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
+    } catch {
+      // The current workspace still works when browser storage is unavailable.
+    }
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (connectionStatus === "open") return;
+    setWorkspaceSwitching(false);
+  }, [connectionStatus]);
+
+  useEffect(() => {
     if (connectionStatus !== "open" || !authenticated) return;
     send({ id: `sessions-${crypto.randomUUID()}`, type: "bridge.list_sessions" });
   }, [authenticated, connectionStatus, send]);
@@ -423,6 +477,7 @@ export function App() {
     send({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
     send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
     send({ id: `models-${crypto.randomUUID()}`, type: "get_available_models" });
+    send({ id: `sessions-${crypto.randomUUID()}`, type: "bridge.list_sessions" });
   }, [authenticated, bridge.pid, bridge.status, connectionStatus, send]);
 
   useEffect(() => {
@@ -455,6 +510,20 @@ export function App() {
     send({ type: "bridge.auth", token: trimmed });
   }
 
+  function selectWorkspace(path: string): void {
+    if (path === bridge.workspace || workspaceSwitching) return;
+    if (rpcState?.isStreaming) {
+      setNotice({ tone: "info", message: "Wait for the current run to finish before changing workspace" });
+      return;
+    }
+    setWorkspaceSwitching(true);
+    const sent = send({ id: crypto.randomUUID(), type: "bridge.set_workspace", workspace: path });
+    if (!sent) {
+      setWorkspaceSwitching(false);
+      setNotice({ tone: "error", message: "Bridge disconnected before the workspace could change" });
+    }
+  }
+
   const canSend = connectionStatus === "open" && authenticated && bridge.status === "running";
   const contextPercent = stats?.contextUsage?.percent;
   const contextLabel = contextPercent === null || contextPercent === undefined
@@ -468,6 +537,8 @@ export function App() {
         bridgeStatus={bridge.status}
         connectionStatus={connectionStatus}
         workspace={bridge.workspace}
+        workspaces={workspaces}
+        workspaceSwitching={workspaceSwitching}
         rpcState={rpcState}
         sessions={sessions}
         onClose={() => setSidebarOpen(false)}
@@ -477,6 +548,8 @@ export function App() {
         }}
         onNewSession={() => send({ id: crypto.randomUUID(), type: "new_session" })}
         onRestart={() => send({ id: crypto.randomUUID(), type: "bridge.restart" })}
+        onAddWorkspace={selectWorkspace}
+        onSelectWorkspace={selectWorkspace}
       />
 
       <main className="main-panel">
@@ -547,10 +620,12 @@ export function App() {
           models={availableModels}
           model={rpcState?.model ?? null}
           thinkingLevel={rpcState?.thinkingLevel ?? "off"}
-          onSend={(message) => send({
+          onSend={({ message, images, files }: PromptSubmission) => send({
             id: crypto.randomUUID(),
             type: "prompt",
             message,
+            ...(images.length > 0 ? { images } : {}),
+            ...(files.length > 0 ? { files } : {}),
             ...(rpcState?.isStreaming ? { streamingBehavior: "steer" } : {}),
           })}
           onAbort={() => send({ id: crypto.randomUUID(), type: "abort" })}

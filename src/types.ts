@@ -25,6 +25,24 @@ export interface ImageBlock {
   mimeType?: string;
 }
 
+export interface PromptImage {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export interface PromptFile {
+  name: string;
+  data: string;
+  mimeType: string;
+}
+
+export interface PromptSubmission {
+  message: string;
+  images: PromptImage[];
+  files: PromptFile[];
+}
+
 export type ContentBlock = TextBlock | ThinkingBlock | ToolCallBlock | ImageBlock | Record<string, unknown>;
 
 export interface AgentMessage {

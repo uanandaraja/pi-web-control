@@ -15,13 +15,19 @@ Install dependencies:
 bun install
 ```
 
-Start the app against a workspace:
+Start the app:
+
+```bash
+bun run dev
+```
+
+Open `http://127.0.0.1:5173`.
+
+Pi starts in the directory where you launch the app. Use the **Workspaces** section in the sidebar to add or switch to another directory on the host. You can still set an initial directory explicitly when useful:
 
 ```bash
 PI_WORKSPACE=/absolute/path/to/your/project bun run dev
 ```
-
-Open `http://127.0.0.1:5173`.
 
 The Bun bridge listens on `127.0.0.1:8787`. Vite proxies `/ws` and `/api` to it during development.
 
@@ -29,7 +35,7 @@ The Bun bridge listens on `127.0.0.1:8787`. Vite proxies `/ws` and `/api` to it 
 
 ```bash
 bun run build
-PI_WORKSPACE=/absolute/path/to/your/project bun run start
+bun run start
 ```
 
 Open `http://127.0.0.1:8787`.
@@ -62,6 +68,7 @@ The server refuses to bind to a non-loopback address without `PI_WEB_TOKEN`. For
 - Prompt steering while Pi is running
 - Abort, restart, and new session controls
 - Search and resume previous sessions saved for the active workspace
+- Add and switch host workspaces from the sidebar
 - Session statistics and context usage
 - Extension confirm, select, input, and editor dialogs
 - Reconnect and session restoration
