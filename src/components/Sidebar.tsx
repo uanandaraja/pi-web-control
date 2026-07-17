@@ -74,8 +74,9 @@ export function Sidebar({
   return (
     <>
       <button className={`sidebar-backdrop ${open ? "visible" : ""}`} type="button" onClick={onClose} aria-label="Close sidebar" />
-      <aside className={`sidebar ${open ? "open" : ""}`}>
+      <aside id="app-sidebar" className={`sidebar ${open ? "open" : ""}`}>
         <div className="sidebar-close-row">
+          <strong className="sidebar-title">Pi Control</strong>
           <button className="icon-button sidebar-close" type="button" onClick={onClose} aria-label="Close sidebar">
             <X size={18} />
           </button>

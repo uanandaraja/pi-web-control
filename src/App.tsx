@@ -272,6 +272,7 @@ export function App() {
   const [extensionRequest, setExtensionRequest] = useState<ExtensionRequest | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [desktopSidebarHidden, setDesktopSidebarHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appearance, setAppearance] = useState<Appearance>(getInitialAppearance);
   const [themeId, setThemeId] = useState<ThemeId>(getInitialTheme);
@@ -549,8 +550,18 @@ export function App() {
     ? "Pending"
     : `${contextPercent.toFixed(1)}%`;
 
+  function closeSidebar(): void {
+    setSidebarOpen(false);
+    if (!window.matchMedia("(max-width: 860px)").matches) setDesktopSidebarHidden(true);
+  }
+
+  function openSidebar(): void {
+    setDesktopSidebarHidden(false);
+    setSidebarOpen(true);
+  }
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${desktopSidebarHidden ? "sidebar-hidden" : ""}`}>
       <Sidebar
         open={sidebarOpen}
         bridgeStatus={bridge.status}
@@ -560,7 +571,7 @@ export function App() {
         workspaceSwitching={workspaceSwitching}
         rpcState={rpcState}
         sessions={sessions}
-        onClose={() => setSidebarOpen(false)}
+        onClose={closeSidebar}
         onSelectSession={(session) => {
           setSidebarOpen(false);
           send({ id: crypto.randomUUID(), type: "switch_session", sessionPath: session.path });
@@ -577,7 +588,14 @@ export function App() {
 
       <main className="main-panel">
         <header className="topbar">
-          <button className="icon-button menu-button" type="button" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar">
+          <button
+            className="icon-button menu-button"
+            type="button"
+            onClick={openSidebar}
+            aria-label="Open sidebar"
+            aria-controls="app-sidebar"
+            aria-expanded={!desktopSidebarHidden && sidebarOpen}
+          >
             <List size={20} />
           </button>
           <div className="topbar-usage" aria-label="Session usage">
