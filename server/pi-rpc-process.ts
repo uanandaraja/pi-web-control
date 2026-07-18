@@ -23,19 +23,26 @@ function spawnPi(config: AppConfig) {
   });
 }
 
-export interface BridgeSnapshot extends JsonObject {
+export type BridgeSnapshot = JsonObject & {
   type: "bridge_status";
   status: PiBridgeStatus;
   workspace: string;
   pid?: number;
   message?: string;
-}
+};
+
+type PendingRequest = {
+  resolve: (response: JsonObject) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
 
 export class PiRpcProcess {
   private child: PiChild | null = null;
   private status: PiBridgeStatus = "stopped";
   private statusMessage: string | undefined;
   private readonly listeners = new Set<(message: JsonObject) => void>();
+  private readonly pendingRequests = new Map<string, PendingRequest>();
 
   constructor(private readonly config: AppConfig) {}
 
@@ -83,6 +90,7 @@ export class PiRpcProcess {
     this.status = "stopped";
     this.statusMessage = undefined;
     this.child = null;
+    this.rejectPendingRequests(new Error("Pi stopped before the command completed"));
     child.stdin.end();
     child.kill("SIGTERM");
     await child.exited;
@@ -103,6 +111,25 @@ export class PiRpcProcess {
     this.child.stdin.flush();
   }
 
+  request(command: JsonObject, timeoutMs = 15_000): Promise<JsonObject> {
+    const id = typeof command.id === "string" ? command.id : crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`Pi command timed out: ${String(command.type ?? "unknown")}`));
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timeout });
+
+      try {
+        this.send({ ...command, id });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingRequests.delete(id);
+        reject(error);
+      }
+    });
+  }
+
   private setStatus(status: PiBridgeStatus, message?: string): void {
     this.status = status;
     this.statusMessage = message;
@@ -119,6 +146,7 @@ export class PiRpcProcess {
 
     this.child = null;
     const expected = this.status === "stopped";
+    this.rejectPendingRequests(new Error(`Pi exited with code ${exitCode}`));
     this.setStatus(expected ? "stopped" : "error", expected ? undefined : `Pi exited with code ${exitCode}`);
   }
 
@@ -152,7 +180,17 @@ export class PiRpcProcess {
     try {
       const value: unknown = JSON.parse(line);
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        this.emit(value as JsonObject);
+        const message = value as JsonObject;
+        const id = typeof message.id === "string" ? message.id : undefined;
+        if (id) {
+          const pending = this.pendingRequests.get(id);
+          if (pending) {
+            clearTimeout(pending.timeout);
+            this.pendingRequests.delete(id);
+            pending.resolve(message);
+          }
+        }
+        this.emit(message);
       }
     } catch {
       this.emit({
@@ -162,6 +200,14 @@ export class PiRpcProcess {
         detail: line.slice(0, 500),
       });
     }
+  }
+
+  private rejectPendingRequests(error: Error): void {
+    for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pendingRequests.clear();
   }
 
   private async readStderr(stream: ReadableStream<Uint8Array>): Promise<void> {

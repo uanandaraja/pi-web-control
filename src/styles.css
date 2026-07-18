@@ -1575,6 +1575,35 @@ button:active:not(:disabled) {
   padding-top: 2px;
 }
 
+.sidebar-new-session-row {
+  display: flex;
+  width: calc(100% - 31px);
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  margin-left: 31px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--muted) 64%, transparent);
+  font-size: 10px;
+  text-align: left;
+  background: transparent;
+  transition-property: color, background-color, scale;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.sidebar-new-session-row:hover,
+.sidebar-new-session-row:focus-visible {
+  color: var(--text);
+  background: var(--soft);
+}
+
+.sidebar-new-session-row:active {
+  scale: 0.96;
+}
+
 .sidebar-session-row {
   min-height: 29px;
   gap: 7px;
@@ -1621,6 +1650,57 @@ button:active:not(:disabled) {
 
 .sidebar-session-row.active > span {
   color: var(--text);
+}
+
+.sidebar-session-row > .runtime-status {
+  display: inline-flex;
+  overflow: visible;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  max-width: 92px;
+  color: color-mix(in srgb, var(--muted) 68%, transparent);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-status i {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.runtime-status.running {
+  color: var(--accent);
+}
+
+.runtime-status.running i {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: runtime-pulse 1.8s ease-in-out infinite;
+}
+
+.runtime-status-error {
+  color: var(--danger);
+}
+
+.runtime-status-starting,
+.runtime-status.needs-input {
+  color: var(--warning);
+}
+
+.runtime-status.needs-input i {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 14%, transparent);
+}
+
+@keyframes runtime-pulse {
+  50% {
+    opacity: 0.5;
+    transform: scale(0.82);
+  }
 }
 
 .sidebar-show-more {

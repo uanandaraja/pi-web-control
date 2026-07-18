@@ -25,6 +25,7 @@ import type {
   ModelInfo,
   PromptSubmission,
   RpcState,
+  RuntimeSnapshot,
   SessionSummary,
   ServerEvent,
   SessionStats,
@@ -52,7 +53,6 @@ interface Notice {
 interface PendingSessionOpen {
   workspace: string;
   session: SessionSummary;
-  switchSent: boolean;
 }
 
 const WORKSPACES_STORAGE_KEY = "pi-web-workspaces";
@@ -86,6 +86,20 @@ function isModelInfo(value: unknown): value is ModelInfo {
 function isSessionSummary(value: unknown): value is SessionSummary {
   return typeof value === "object" && value !== null &&
     "path" in value && typeof value.path === "string";
+}
+
+function isRuntimeSnapshot(value: unknown): value is RuntimeSnapshot {
+  return typeof value === "object" && value !== null &&
+    "id" in value && typeof value.id === "string" &&
+    "workspace" in value && typeof value.workspace === "string" &&
+    "status" in value && typeof value.status === "string";
+}
+
+function isExtensionRequest(value: unknown): value is ExtensionRequest {
+  return typeof value === "object" && value !== null &&
+    "type" in value && value.type === "extension_ui_request" &&
+    "id" in value && typeof value.id === "string" &&
+    "method" in value && typeof value.method === "string";
 }
 
 function upsertMessage(entries: TimelineEntry[], message: AgentMessage, streaming: boolean): TimelineEntry[] {
@@ -273,6 +287,8 @@ function formatCost(cost?: number): string {
 
 export function App() {
   const [bridge, setBridge] = useState<BridgeState>({ status: "stopped" });
+  const [runtimes, setRuntimes] = useState<Record<string, RuntimeSnapshot>>({});
+  const [activeRuntimeId, setActiveRuntimeId] = useState<string>();
   const [rpcState, setRpcState] = useState<RpcState | null>(null);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
@@ -280,7 +296,6 @@ export function App() {
   const [sessionListsLoading, setSessionListsLoading] = useState<string[]>([]);
   const [pendingSession, setPendingSession] = useState<PendingSessionOpen | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>(loadStoredWorkspaces);
-  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [extensionRequest, setExtensionRequest] = useState<ExtensionRequest | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -296,6 +311,8 @@ export function App() {
   const [syncRevision, setSyncRevision] = useState(0);
   const [fullSyncRevision, setFullSyncRevision] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  const activeRuntimeIdRef = useRef<string | undefined>(undefined);
+  const runtimesRef = useRef<Record<string, RuntimeSnapshot>>({});
   const sessionCacheRef = useRef<Record<string, SessionSummary[]>>({});
   const sessionLoadingRef = useRef(new Set<string>());
   const sessionRequestWorkspacesRef = useRef(new Map<string, string>());
@@ -303,6 +320,8 @@ export function App() {
   const scrollToBottomRef = useRef(false);
 
   sessionCacheRef.current = sessionsByWorkspace;
+  runtimesRef.current = runtimes;
+  activeRuntimeIdRef.current = activeRuntimeId;
 
   useEffect(() => {
     applyTheme(themeId, appearance);
@@ -310,7 +329,66 @@ export function App() {
     saveTheme(themeId);
   }, [appearance, themeId]);
 
-  const onEvent = useCallback((event: ServerEvent) => {
+  const onEvent = useCallback((incomingEvent: ServerEvent) => {
+    let event = incomingEvent;
+
+    if (incomingEvent.type === "bridge_snapshot") {
+      setAuthenticated(true);
+      const runtimeList = Array.isArray(incomingEvent.runtimes)
+        ? incomingEvent.runtimes.filter(isRuntimeSnapshot)
+        : [];
+      const nextRuntimes = Object.fromEntries(runtimeList.map((runtime) => [runtime.id, runtime]));
+      setRuntimes(nextRuntimes);
+      runtimesRef.current = nextRuntimes;
+      for (const runtime of runtimeList) {
+        setWorkspaces((current) => rememberWorkspace(current, runtime.workspace));
+      }
+      const active = activeRuntimeIdRef.current && nextRuntimes[activeRuntimeIdRef.current]
+        ? nextRuntimes[activeRuntimeIdRef.current]
+        : runtimeList[0];
+      if (active) {
+        activeRuntimeIdRef.current = active.id;
+        setActiveRuntimeId(active.id);
+        setBridge(active);
+        setExtensionRequest(isExtensionRequest(active.pendingUiRequest) ? active.pendingUiRequest : null);
+        setFullSyncRevision((value) => value + 1);
+      }
+      return;
+    }
+    if (incomingEvent.type === "runtime_snapshot" && isRuntimeSnapshot(incomingEvent.runtime)) {
+      const runtime = incomingEvent.runtime;
+      setRuntimes((current) => {
+        const next = { ...current, [runtime.id]: runtime };
+        runtimesRef.current = next;
+        return next;
+      });
+      setWorkspaces((current) => rememberWorkspace(current, runtime.workspace));
+      if (!activeRuntimeIdRef.current) {
+        activeRuntimeIdRef.current = runtime.id;
+        setActiveRuntimeId(runtime.id);
+        setBridge(runtime);
+        setFullSyncRevision((value) => value + 1);
+      } else if (activeRuntimeIdRef.current === runtime.id) {
+        setBridge(runtime);
+        setExtensionRequest(isExtensionRequest(runtime.pendingUiRequest) ? runtime.pendingUiRequest : null);
+      }
+      return;
+    }
+    if (incomingEvent.type === "runtime_removed" && typeof incomingEvent.runtimeId === "string") {
+      setRuntimes((current) => {
+        const next = { ...current };
+        delete next[incomingEvent.runtimeId as string];
+        runtimesRef.current = next;
+        return next;
+      });
+      return;
+    }
+    if (incomingEvent.type === "runtime_event") {
+      if (incomingEvent.runtimeId !== activeRuntimeIdRef.current) return;
+      if (typeof incomingEvent.event !== "object" || incomingEvent.event === null || Array.isArray(incomingEvent.event)) return;
+      event = incomingEvent.event as ServerEvent;
+    }
+
     if (event.type === "bridge_auth_required") {
       setAuthRequired(true);
       return;
@@ -348,22 +426,26 @@ export function App() {
       return;
     }
     if (event.type === "bridge_response") {
-      if (event.command === "set_workspace") {
-        setWorkspaceSwitching(false);
+      if (event.command === "create_runtime" || event.command === "open_session") {
         if (event.success === false) {
-          awaitingSessionMessagesRef.current = false;
           setPendingSession(null);
-          setNotice({ tone: "error", message: eventString(event, "error") ?? "Could not change workspace" });
+          setNotice({ tone: "error", message: eventString(event, "error") ?? "Could not open session" });
           return;
         }
         const data = event.data;
-        const workspace = typeof data === "object" && data !== null && "workspace" in data && typeof data.workspace === "string"
-          ? data.workspace
+        const runtime = typeof data === "object" && data !== null && "runtime" in data && isRuntimeSnapshot(data.runtime)
+          ? data.runtime
           : undefined;
-        if (workspace) setWorkspaces((current) => rememberWorkspace(current, workspace));
+        if (!runtime) return;
+        setRuntimes((current) => ({ ...current, [runtime.id]: runtime }));
+        activeRuntimeIdRef.current = runtime.id;
+        setActiveRuntimeId(runtime.id);
+        setBridge(runtime);
+        setWorkspaces((current) => rememberWorkspace(current, runtime.workspace));
         setTimeline([]);
         setRpcState(null);
         setStats(null);
+        setPendingSession(null);
         setFullSyncRevision((value) => value + 1);
         return;
       }
@@ -518,6 +600,12 @@ export function App() {
 
   const { status: connectionStatus, send, reconnect } = usePiSocket({ onEvent });
 
+  const sendRuntime = useCallback((command: Record<string, unknown>): boolean => {
+    const runtimeId = activeRuntimeIdRef.current;
+    if (!runtimeId) return false;
+    return send({ type: "runtime.send", runtimeId, command });
+  }, [send]);
+
   const requestWorkspaceSessions = useCallback((workspace: string, force = false): void => {
     const path = workspace.trim();
     if (!path || (!force && Object.hasOwn(sessionCacheRef.current, path)) || sessionLoadingRef.current.has(path)) return;
@@ -550,7 +638,6 @@ export function App() {
 
   useEffect(() => {
     if (connectionStatus === "open") return;
-    setWorkspaceSwitching(false);
     setPendingSession(null);
     awaitingSessionMessagesRef.current = false;
     sessionLoadingRef.current.clear();
@@ -559,44 +646,28 @@ export function App() {
   }, [connectionStatus]);
 
   useEffect(() => {
-    if (connectionStatus !== "open" || !authenticated || bridge.status !== "running" || !bridge.workspace) return;
-    send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
-    send({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
-    send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
-    send({ id: `models-${crypto.randomUUID()}`, type: "get_available_models" });
+    if (connectionStatus !== "open" || !authenticated || bridge.status !== "running" || !bridge.workspace || !activeRuntimeId) return;
+    sendRuntime({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
+    sendRuntime({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
+    sendRuntime({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
+    sendRuntime({ id: `models-${crypto.randomUUID()}`, type: "get_available_models" });
     requestWorkspaceSessions(bridge.workspace, true);
-  }, [authenticated, bridge.pid, bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, send]);
+  }, [activeRuntimeId, authenticated, bridge.pid, bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, sendRuntime]);
 
   useEffect(() => {
     if (syncRevision === 0 || connectionStatus !== "open" || bridge.status !== "running") return;
-    send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
-    send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
+    sendRuntime({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
+    sendRuntime({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
     if (bridge.workspace) requestWorkspaceSessions(bridge.workspace, true);
-  }, [bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, send, syncRevision]);
+  }, [bridge.status, bridge.workspace, connectionStatus, requestWorkspaceSessions, sendRuntime, syncRevision]);
 
   useEffect(() => {
     if (fullSyncRevision === 0 || connectionStatus !== "open" || bridge.status !== "running") return;
-    send({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
-    send({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
-    send({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
+    sendRuntime({ id: `state-${crypto.randomUUID()}`, type: "get_state" });
+    sendRuntime({ id: `messages-${crypto.randomUUID()}`, type: "get_messages" });
+    sendRuntime({ id: `stats-${crypto.randomUUID()}`, type: "get_session_stats" });
     if (bridge.workspace) requestWorkspaceSessions(bridge.workspace, true);
-  }, [bridge.status, bridge.workspace, connectionStatus, fullSyncRevision, requestWorkspaceSessions, send]);
-
-  useEffect(() => {
-    if (!pendingSession || pendingSession.switchSent || workspaceSwitching ||
-      connectionStatus !== "open" || !authenticated || bridge.status !== "running" ||
-      bridge.workspace !== pendingSession.workspace) return;
-
-    const sent = send({ id: crypto.randomUUID(), type: "switch_session", sessionPath: pendingSession.session.path });
-    if (!sent) {
-      setPendingSession(null);
-      setNotice({ tone: "error", message: "Bridge disconnected before the session could open" });
-      return;
-    }
-    setPendingSession((current) => current?.session.path === pendingSession.session.path
-      ? { ...current, switchSent: true }
-      : current);
-  }, [authenticated, bridge.status, bridge.workspace, connectionStatus, pendingSession, send, workspaceSwitching]);
+  }, [bridge.status, bridge.workspace, connectionStatus, fullSyncRevision, requestWorkspaceSessions, sendRuntime]);
 
   useEffect(() => {
     const feed = feedRef.current;
@@ -618,30 +689,46 @@ export function App() {
     send({ type: "bridge.auth", token: trimmed });
   }
 
-  function selectWorkspace(path: string): boolean {
-    if (path === bridge.workspace) return true;
-    if (workspaceSwitching) return false;
-    if (rpcState?.isStreaming) {
-      setNotice({ tone: "info", message: "Wait for the current run to finish before opening a session in another workspace" });
-      return false;
-    }
-    setWorkspaceSwitching(true);
-    const sent = send({ id: crypto.randomUUID(), type: "bridge.set_workspace", workspace: path });
-    if (!sent) {
-      setWorkspaceSwitching(false);
-      setNotice({ tone: "error", message: "Bridge disconnected before the workspace could change" });
-    }
-    return sent;
+  function activateRuntime(runtimeId: string): void {
+    if (runtimeId === activeRuntimeIdRef.current) return;
+    const runtime = runtimesRef.current[runtimeId];
+    if (!runtime) return;
+    activeRuntimeIdRef.current = runtimeId;
+    setActiveRuntimeId(runtimeId);
+    setBridge(runtime);
+    setTimeline([]);
+    setRpcState(null);
+    setStats(null);
+    setExtensionRequest(isExtensionRequest(runtime.pendingUiRequest) ? runtime.pendingUiRequest : null);
+    setFullSyncRevision((value) => value + 1);
   }
 
   function selectSession(workspace: string, session: SessionSummary): void {
-    if (pendingSession || (workspace === bridge.workspace && session.path === rpcState?.sessionFile)) return;
-    if (bridge.status !== "running") {
-      setNotice({ tone: "info", message: "Start Pi before opening a saved session" });
+    if (pendingSession) return;
+    const existing = Object.values(runtimesRef.current).find((runtime) => runtime.sessionFile === session.path);
+    if (existing) {
+      activateRuntime(existing.id);
       return;
     }
-    setPendingSession({ workspace, session, switchSent: false });
-    if (!selectWorkspace(workspace)) setPendingSession(null);
+    setPendingSession({ workspace, session });
+    if (!send({
+      id: crypto.randomUUID(),
+      type: "bridge.open_session",
+      workspace,
+      sessionPath: session.path,
+    })) {
+      setPendingSession(null);
+      setNotice({ tone: "error", message: "Bridge disconnected before the session could open" });
+    }
+  }
+
+  function createSession(workspaceOverride?: string): void {
+    const workspace = workspaceOverride ?? bridge.workspace ?? workspaces[0];
+    if (!workspace) {
+      setNotice({ tone: "info", message: "Add a workspace before creating a session" });
+      return;
+    }
+    send({ id: crypto.randomUUID(), type: "bridge.create_runtime", workspace });
   }
 
   const canSend = connectionStatus === "open" && authenticated && bridge.status === "running";
@@ -664,11 +751,11 @@ export function App() {
     <div className={`app-shell ${desktopSidebarHidden ? "sidebar-hidden" : ""}`}>
       <Sidebar
         open={sidebarOpen}
-        bridgeStatus={bridge.status}
         connectionStatus={connectionStatus}
         workspace={bridge.workspace}
         workspaces={workspaces}
-        workspaceSwitching={workspaceSwitching}
+        runtimes={Object.values(runtimes)}
+        activeRuntimeId={activeRuntimeId}
         rpcState={rpcState}
         sessionsByWorkspace={sessionsByWorkspace}
         sessionListsLoading={sessionListsLoading}
@@ -678,8 +765,12 @@ export function App() {
           setSidebarOpen(false);
           selectSession(workspace, session);
         }}
-        onNewSession={() => send({ id: crypto.randomUUID(), type: "new_session" })}
-        onRestart={() => send({ id: crypto.randomUUID(), type: "bridge.restart" })}
+        onSelectRuntime={(runtimeId) => {
+          setSidebarOpen(false);
+          activateRuntime(runtimeId);
+        }}
+        onNewSession={createSession}
+        onRestart={() => activeRuntimeId && send({ id: crypto.randomUUID(), type: "bridge.restart_runtime", runtimeId: activeRuntimeId })}
         onOpenSettings={() => {
           setSidebarOpen(false);
           setSettingsOpen(true);
@@ -738,7 +829,7 @@ export function App() {
                 <h1>Let&apos;s lock in.</h1>
                 <p>What are we doing here?</p>
                 {bridge.status !== "running" ? (
-                  <button className="primary-button" type="button" onClick={() => send({ id: crypto.randomUUID(), type: "bridge.start" })}>
+                  <button className="primary-button" type="button" onClick={() => activeRuntimeId && send({ id: crypto.randomUUID(), type: "bridge.restart_runtime", runtimeId: activeRuntimeId })}>
                     <Play size={16} weight="fill" />
                     Start Pi
                   </button>
@@ -769,7 +860,7 @@ export function App() {
           models={availableModels}
           model={rpcState?.model ?? null}
           thinkingLevel={rpcState?.thinkingLevel ?? "off"}
-          onSend={({ message, images, files }: PromptSubmission) => send({
+          onSend={({ message, images, files }: PromptSubmission) => sendRuntime({
             id: crypto.randomUUID(),
             type: "prompt",
             message,
@@ -777,14 +868,14 @@ export function App() {
             ...(files.length > 0 ? { files } : {}),
             ...(rpcState?.isStreaming ? { streamingBehavior: "steer" } : {}),
           })}
-          onAbort={() => send({ id: crypto.randomUUID(), type: "abort" })}
+          onAbort={() => sendRuntime({ id: crypto.randomUUID(), type: "abort" })}
           onModelChange={(model) => {
             setRpcState((state) => state ? { ...state, model } : state);
-            send({ id: crypto.randomUUID(), type: "set_model", provider: model.provider, modelId: model.id });
+            sendRuntime({ id: crypto.randomUUID(), type: "set_model", provider: model.provider, modelId: model.id });
           }}
           onThinkingLevelChange={(level: ThinkingLevel) => {
             setRpcState((state) => state ? { ...state, thinkingLevel: level } : state);
-            send({ id: crypto.randomUUID(), type: "set_thinking_level", level });
+            sendRuntime({ id: crypto.randomUUID(), type: "set_thinking_level", level });
           }}
         />
       </main>
@@ -827,7 +918,7 @@ export function App() {
         <ExtensionDialog
           request={extensionRequest}
           onRespond={(response) => {
-            send(response);
+            sendRuntime({ ...response });
             setExtensionRequest(null);
           }}
         />
