@@ -1575,6 +1575,35 @@ button:active:not(:disabled) {
   padding-top: 2px;
 }
 
+.sidebar-new-session-row {
+  display: flex;
+  width: calc(100% - 31px);
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  margin-left: 31px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--muted) 64%, transparent);
+  font-size: 10px;
+  text-align: left;
+  background: transparent;
+  transition-property: color, background-color, scale;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.sidebar-new-session-row:hover,
+.sidebar-new-session-row:focus-visible {
+  color: var(--text);
+  background: var(--soft);
+}
+
+.sidebar-new-session-row:active {
+  scale: 0.96;
+}
+
 .sidebar-session-row {
   min-height: 29px;
   gap: 7px;
@@ -1621,6 +1650,30 @@ button:active:not(:disabled) {
 
 .sidebar-session-row.active > span {
   color: var(--text);
+}
+
+.sidebar-session-row > .runtime-status {
+  overflow: hidden;
+  flex: 0 0 auto;
+  max-width: 92px;
+  color: color-mix(in srgb, var(--muted) 68%, transparent);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-session-row > .runtime-loading-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.runtime-status-error {
+  color: var(--danger);
+}
+
+.runtime-status.needs-input {
+  color: var(--warning);
 }
 
 .sidebar-show-more {

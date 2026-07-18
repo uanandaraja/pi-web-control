@@ -2,6 +2,24 @@ export type ConnectionStatus = "connecting" | "open" | "closed" | "error";
 export type BridgeStatus = "starting" | "running" | "stopped" | "error";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type RuntimeSnapshot = {
+  id: string;
+  workspace: string;
+  status: BridgeStatus;
+  isStreaming: boolean;
+  lastActiveAt: number;
+  pid?: number;
+  sessionFile?: string | null;
+  sessionId?: string;
+  sessionName?: string;
+  messageCount?: number;
+  pendingMessageCount?: number;
+  activity?: string;
+  needsInput?: boolean;
+  pendingUiRequest?: ExtensionRequest;
+  error?: string;
+};
+
 export interface TextBlock {
   type: "text";
   text: string;

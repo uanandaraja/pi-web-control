@@ -1,6 +1,6 @@
 # Pi Control
 
-A small Bun, Vite, and React control surface for Pi RPC. The Bun server launches `pi --mode rpc`, parses JSONL from stdout, and forwards events to the browser over WebSocket.
+A small Bun, Vite, and React control surface for Pi RPC. The Bun server manages independent `pi --mode rpc` processes for active threads, parses JSONL from each process, and forwards runtime-scoped events to the browser over WebSocket.
 
 ## Run locally
 
@@ -67,11 +67,17 @@ The server refuses to bind to a non-loopback address without `PI_WEB_TOKEN`. For
 - Bottom-docked prompt composer with model search and thinking-level controls
 - Prompt steering while Pi is running
 - Abort, restart, and new session controls
-- Search and resume previous sessions saved for the active workspace
-- Add and switch host workspaces from the sidebar
+- Search and resume previous sessions across workspaces
+- Run any number of sessions concurrently in independent Pi processes
+- Jump between live threads without interrupting background work
+- Per-thread running, activity, idle, failed, and needs-input indicators
+- Start a fresh thread in any saved workspace from the sidebar
 - Session statistics and context usage
 - Extension confirm, select, input, and editor dialogs
 - Reconnect and session restoration
 - Optional access token authentication
 
-This is a single-operator MVP. Multiple browser tabs share the same Pi process and can all send commands.
+This is a single-operator MVP. Multiple browser tabs share the same server-side runtime pool and can all send commands. There is intentionally no concurrency cap.
+
+> [!WARNING]
+> Concurrent agents in the same workspace can edit the same files and overwrite or conflict with one another. Runtime isolation does not provide filesystem isolation; use separate worktrees when tasks may touch overlapping files.

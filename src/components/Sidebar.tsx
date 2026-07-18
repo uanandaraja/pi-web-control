@@ -10,31 +10,48 @@ import {
 } from "@phosphor-icons/react";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { relativeSessionTime, sessionTitle } from "../lib/sessions";
-import type { BridgeStatus, ConnectionStatus, RpcState, SessionSummary } from "../types";
+import type { ConnectionStatus, RpcState, RuntimeSnapshot, SessionSummary } from "../types";
 
-interface SidebarProps {
+type SidebarProps = {
   open: boolean;
-  bridgeStatus: BridgeStatus;
   connectionStatus: ConnectionStatus;
   workspace?: string;
   workspaces: string[];
-  workspaceSwitching: boolean;
+  runtimes: RuntimeSnapshot[];
+  activeRuntimeId?: string;
   rpcState: RpcState | null;
   sessionsByWorkspace: Record<string, SessionSummary[]>;
   sessionListsLoading: string[];
   openingSessionPath?: string;
   onClose: () => void;
   onSelectSession: (workspace: string, session: SessionSummary) => void;
-  onNewSession: () => void;
+  onSelectRuntime: (runtimeId: string) => void;
+  onNewSession: (workspace?: string) => void;
   onRestart: () => void;
   onOpenSettings: () => void;
   onAddWorkspace: (path: string) => void;
   onToggleWorkspace: (path: string) => void;
-}
+};
 
 function basename(path?: string): string {
   if (!path) return "No workspace";
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+}
+
+function RuntimeIndicator({ runtime }: { runtime: RuntimeSnapshot }) {
+  if (runtime.needsInput) return <span className="runtime-status needs-input">Needs input</span>;
+  if (runtime.status === "starting" || runtime.isStreaming) {
+    return (
+      <CircleNotch
+        className="spin runtime-loading-icon"
+        size={12}
+        aria-label={runtime.activity ?? (runtime.status === "starting" ? "Starting" : "Running")}
+      />
+    );
+  }
+  if (runtime.status === "error") return <span className="runtime-status runtime-status-error">Failed</span>;
+  if (runtime.status === "stopped") return <span className="runtime-status">Stopped</span>;
+  return null;
 }
 
 const COLLAPSED_SESSION_COUNT = 5;
@@ -42,17 +59,18 @@ const workspaceCollator = new Intl.Collator(undefined, { numeric: true, sensitiv
 
 export function Sidebar({
   open,
-  bridgeStatus,
   connectionStatus,
   workspace,
   workspaces,
-  workspaceSwitching,
+  runtimes,
+  activeRuntimeId,
   rpcState,
   sessionsByWorkspace,
   sessionListsLoading,
   openingSessionPath,
   onClose,
   onSelectSession,
+  onSelectRuntime,
   onNewSession,
   onRestart,
   onOpenSettings,
@@ -63,7 +81,7 @@ export function Sidebar({
   const [workspacePath, setWorkspacePath] = useState("");
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(() => new Set());
   const [showAllSessions, setShowAllSessions] = useState<Set<string>>(() => new Set());
-  const workspaceControlsDisabled = connectionStatus !== "open" || workspaceSwitching;
+  const workspaceControlsDisabled = connectionStatus !== "open";
   const sortedWorkspaces = useMemo(() => [...workspaces].sort((left, right) =>
     workspaceCollator.compare(basename(left), basename(right)) || workspaceCollator.compare(left, right)
   ), [workspaces]);
@@ -120,7 +138,7 @@ export function Sidebar({
         </div>
 
         <nav className="sidebar-actions" aria-label="App actions">
-          <button type="button" onClick={onNewSession} disabled={bridgeStatus !== "running"}>
+          <button type="button" onClick={() => onNewSession()} disabled={connectionStatus !== "open"}>
             <Plus size={16} />
             New session
           </button>
@@ -182,6 +200,10 @@ export function Sidebar({
               const loading = sessionListsLoading.includes(path);
               const showAll = showAllSessions.has(path);
               const visibleSessions = showAll ? sessions : sessions?.slice(0, COLLAPSED_SESSION_COUNT);
+              const workspaceRuntimes = runtimes.filter((runtime) => runtime.workspace === path);
+              const listedSessionPaths = new Set(sessions?.map((session) => session.path) ?? []);
+              const unlistedRuntimes = workspaceRuntimes.filter((runtime) =>
+                !runtime.sessionFile || !listedSessionPaths.has(runtime.sessionFile));
 
               return (
                 <div className={`workspace-group ${activeWorkspace ? "active" : ""}`} key={path}>
@@ -200,13 +222,36 @@ export function Sidebar({
                   </button>
                   {expanded ? (
                     <div className="sidebar-session-list">
+                      <button className="sidebar-new-session-row" type="button" onClick={() => onNewSession(path)}>
+                        <Plus size={11} />
+                        New thread
+                      </button>
+                      {unlistedRuntimes.map((runtime) => {
+                        const activeSession = runtime.id === activeRuntimeId;
+                        const label = runtime.sessionName?.trim() || "New session";
+                        return (
+                          <button
+                            className={`sidebar-session-row runtime-row ${activeSession ? "active" : ""}`}
+                            key={runtime.id}
+                            type="button"
+                            aria-current={activeSession ? "page" : undefined}
+                            onClick={() => activeSession ? undefined : onSelectRuntime(runtime.id)}
+                            title={label}
+                          >
+                            <span>{label}</span>
+                            <RuntimeIndicator runtime={runtime} />
+                          </button>
+                        );
+                      })}
                       {sessions === undefined ? (
                         <div className="sidebar-loading-sessions" role="status">
                           <CircleNotch className="spin" size={12} />
                           Loading sessions…
                         </div>
                       ) : sessions.length > 0 ? visibleSessions?.map((session) => {
-                        const activeSession = activeWorkspace && session.path === rpcState?.sessionFile;
+                        const runtime = workspaceRuntimes.find((candidate) => candidate.sessionFile === session.path);
+                        const activeSession = runtime?.id === activeRuntimeId ||
+                          (activeWorkspace && !runtime && session.path === rpcState?.sessionFile);
                         const opening = session.path === openingSessionPath;
                         return (
                           <button
@@ -216,20 +261,26 @@ export function Sidebar({
                             aria-current={activeSession ? "page" : undefined}
                             aria-busy={opening || undefined}
                             disabled={Boolean(openingSessionPath) && !opening}
-                            onClick={() => activeSession || opening ? undefined : onSelectSession(path, session)}
+                            onClick={() => activeSession || opening
+                              ? undefined
+                              : runtime
+                                ? onSelectRuntime(runtime.id)
+                                : onSelectSession(path, session)}
                             title={sessionTitle(session)}
                           >
                             <span>{sessionTitle(session)}</span>
                             {opening ? (
                               <CircleNotch className="spin session-loading-icon" size={12} aria-label="Opening session" />
+                            ) : runtime ? (
+                              <RuntimeIndicator runtime={runtime} />
                             ) : (
                               <time className="tabular" dateTime={session.modified}>{relativeSessionTime(session.modified)}</time>
                             )}
                           </button>
                         );
-                      }) : (
+                      }) : unlistedRuntimes.length === 0 ? (
                         <div className="sidebar-empty-sessions">No saved sessions</div>
-                      )}
+                      ) : null}
                       {sessions && sessions.length > COLLAPSED_SESSION_COUNT ? (
                         <button
                           className="sidebar-show-more"

@@ -5,16 +5,16 @@ import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "./config";
-import { PiRpcProcess, type JsonObject } from "./pi-rpc-process";
+import type { JsonObject } from "./pi-rpc-process";
+import { RuntimeManager } from "./runtime-manager";
 
-interface SocketData {
+type SocketData = {
   id: string;
   authenticated: boolean;
   address: string;
-}
+};
 
 const config = loadConfig();
-const pi = new PiRpcProcess(config);
 const appRoot = resolve(import.meta.dir, "..");
 const distRoot = resolve(appRoot, "dist");
 const attachmentRoot = resolve(tmpdir(), "pi-web-control", String(process.pid));
@@ -24,7 +24,6 @@ const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const ATTACHMENT_CONTEXT_START = "<pi_web_control_attachment_context>";
 const ATTACHMENT_CONTEXT_END = "</pi_web_control_attachment_context>";
-let agentRunning = false;
 
 function json(data: unknown, init?: ResponseInit): Response {
   return Response.json(data, {
@@ -238,13 +237,12 @@ async function resolveWorkspacePath(value: unknown): Promise<string> {
   return canonical;
 }
 
-pi.subscribe((message) => {
-  if (message.type === "agent_start") agentRunning = true;
-  if (message.type === "agent_settled") agentRunning = false;
-  if (message.type === "bridge_status" && (message.status === "stopped" || message.status === "error")) {
-    agentRunning = false;
+const runtimes = new RuntimeManager(config, (message) => {
+  if (message.type === "runtime_event") {
+    broadcast({ ...message, event: sanitizePiMessage(message.event) });
+    return;
   }
-  broadcast(message);
+  broadcast(message as unknown as JsonObject);
 });
 
 function matchesToken(candidate: unknown): boolean {
@@ -324,7 +322,7 @@ const server = Bun.serve<SocketData>({
     const url = new URL(request.url);
 
     if (url.pathname === "/api/health") {
-      return json({ ok: true, bridge: pi.snapshot(), authenticationRequired: Boolean(config.token) });
+      return json({ ok: true, runtimes: runtimes.list(), authenticationRequired: Boolean(config.token) });
     }
 
     if (url.pathname === "/ws") {
@@ -344,7 +342,7 @@ const server = Bun.serve<SocketData>({
     open(socket) {
       clients.add(socket);
       if (socket.data.authenticated) {
-        send(socket, pi.snapshot());
+        send(socket, { type: "bridge_snapshot", runtimes: runtimes.list() });
       } else {
         send(socket, { type: "bridge_auth_required" });
       }
@@ -367,7 +365,7 @@ const server = Bun.serve<SocketData>({
         if (message.type === "bridge.auth" && matchesToken(message.token)) {
           socket.data.authenticated = true;
           send(socket, { type: "bridge_auth_ok" });
-          send(socket, pi.snapshot());
+          send(socket, { type: "bridge_snapshot", runtimes: runtimes.list() });
         } else {
           send(socket, { type: "bridge_auth_error", message: "Invalid access token" });
           socket.close(4003, "Authentication failed");
@@ -377,23 +375,12 @@ const server = Bun.serve<SocketData>({
 
       const requestId = typeof message.id === "string" ? message.id : undefined;
       try {
-        if (message.type === "bridge.start") {
-          await pi.start();
-          send(socket, { type: "bridge_response", command: "start", requestId, success: true });
-          return;
-        }
-        if (message.type === "bridge.stop") {
-          await pi.stop();
-          send(socket, { type: "bridge_response", command: "stop", requestId, success: true });
-          return;
-        }
-        if (message.type === "bridge.restart") {
-          await pi.restart();
-          send(socket, { type: "bridge_response", command: "restart", requestId, success: true });
-          return;
-        }
         if (message.type === "bridge.ping") {
           send(socket, { type: "bridge_pong", requestId, timestamp: Date.now() });
+          return;
+        }
+        if (message.type === "bridge.list_runtimes") {
+          send(socket, { type: "bridge_response", command: "list_runtimes", requestId, success: true, data: { runtimes: runtimes.list() } });
           return;
         }
         if (message.type === "bridge.list_sessions") {
@@ -410,32 +397,41 @@ const server = Bun.serve<SocketData>({
           });
           return;
         }
-        if (message.type === "bridge.set_workspace") {
-          if (agentRunning) throw new Error("Wait for the current run to finish before changing workspace");
-
+        if (message.type === "bridge.create_runtime") {
+          const workspace = await resolveWorkspacePath(message.workspace ?? config.workspace);
+          const runtime = await runtimes.create(workspace);
+          send(socket, { type: "bridge_response", command: "create_runtime", requestId, success: true, data: { runtime } });
+          return;
+        }
+        if (message.type === "bridge.open_session") {
           const workspace = await resolveWorkspacePath(message.workspace);
-          const status = pi.snapshot().status;
-          if (status === "starting") throw new Error("Wait for Pi to finish starting before changing workspace");
-
-          if (workspace !== config.workspace) {
-            const shouldRestart = status === "running";
-            if (status !== "stopped") await pi.stop();
-            config.workspace = workspace;
-            broadcast(pi.snapshot());
-            if (shouldRestart) await pi.start();
+          if (typeof message.sessionPath !== "string") throw new Error("A session path is required");
+          const runtime = await runtimes.create(workspace, message.sessionPath);
+          send(socket, { type: "bridge_response", command: "open_session", requestId, success: true, data: { runtime } });
+          return;
+        }
+        if (message.type === "bridge.restart_runtime") {
+          if (typeof message.runtimeId !== "string") throw new Error("A runtime ID is required");
+          const runtime = await runtimes.restart(message.runtimeId);
+          send(socket, { type: "bridge_response", command: "restart_runtime", requestId, success: true, data: { runtime } });
+          return;
+        }
+        if (message.type === "bridge.remove_runtime") {
+          if (typeof message.runtimeId !== "string") throw new Error("A runtime ID is required");
+          await runtimes.remove(message.runtimeId);
+          send(socket, { type: "bridge_response", command: "remove_runtime", requestId, success: true });
+          return;
+        }
+        if (message.type === "runtime.send") {
+          if (typeof message.runtimeId !== "string") throw new Error("A runtime ID is required");
+          if (typeof message.command !== "object" || message.command === null || Array.isArray(message.command)) {
+            throw new Error("A runtime command is required");
           }
-
-          send(socket, {
-            type: "bridge_response",
-            command: "set_workspace",
-            requestId,
-            success: true,
-            data: { workspace },
-          });
+          runtimes.send(message.runtimeId, await preparePrompt(message.command as JsonObject));
           return;
         }
 
-        pi.send(await preparePrompt(message));
+        throw new Error(`Unknown command: ${message.type}`);
       } catch (error) {
         send(socket, {
           type: "bridge_response",
@@ -456,13 +452,13 @@ console.log(`Pi Control server listening on http://${config.host}:${server.port}
 console.log(`Workspace: ${config.workspace}`);
 
 if (config.autoStart) {
-  void pi.start().catch((error) => {
+  void runtimes.create(config.workspace).catch((error) => {
     console.error("Could not start Pi:", error);
   });
 }
 
 async function shutdown(): Promise<void> {
-  await pi.stop();
+  await runtimes.stopAll();
   await rm(attachmentRoot, { recursive: true, force: true });
   server.stop(true);
   process.exit(0);
