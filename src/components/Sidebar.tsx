@@ -38,13 +38,20 @@ function basename(path?: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-function runtimeLabel(runtime: RuntimeSnapshot): string {
-  if (runtime.needsInput) return "Needs input";
-  if (runtime.status === "error") return "Failed";
-  if (runtime.status === "starting") return "Starting";
-  if (runtime.status === "stopped") return "Stopped";
-  if (runtime.isStreaming) return runtime.activity ?? "Running";
-  return "Idle";
+function RuntimeIndicator({ runtime }: { runtime: RuntimeSnapshot }) {
+  if (runtime.needsInput) return <span className="runtime-status needs-input">Needs input</span>;
+  if (runtime.status === "starting" || runtime.isStreaming) {
+    return (
+      <CircleNotch
+        className="spin runtime-loading-icon"
+        size={12}
+        aria-label={runtime.activity ?? (runtime.status === "starting" ? "Starting" : "Running")}
+      />
+    );
+  }
+  if (runtime.status === "error") return <span className="runtime-status runtime-status-error">Failed</span>;
+  if (runtime.status === "stopped") return <span className="runtime-status">Stopped</span>;
+  return null;
 }
 
 const COLLAPSED_SESSION_COUNT = 5;
@@ -232,10 +239,7 @@ export function Sidebar({
                             title={label}
                           >
                             <span>{label}</span>
-                            <span className={`runtime-status runtime-status-${runtime.status} ${runtime.isStreaming ? "running" : ""} ${runtime.needsInput ? "needs-input" : ""}`}>
-                              <i aria-hidden="true" />
-                              {runtimeLabel(runtime)}
-                            </span>
+                            <RuntimeIndicator runtime={runtime} />
                           </button>
                         );
                       })}
@@ -268,10 +272,7 @@ export function Sidebar({
                             {opening ? (
                               <CircleNotch className="spin session-loading-icon" size={12} aria-label="Opening session" />
                             ) : runtime ? (
-                              <span className={`runtime-status runtime-status-${runtime.status} ${runtime.isStreaming ? "running" : ""} ${runtime.needsInput ? "needs-input" : ""}`}>
-                                <i aria-hidden="true" />
-                                {runtimeLabel(runtime)}
-                              </span>
+                              <RuntimeIndicator runtime={runtime} />
                             ) : (
                               <time className="tabular" dateTime={session.modified}>{relativeSessionTime(session.modified)}</time>
                             )}

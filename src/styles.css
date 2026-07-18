@@ -1653,11 +1653,8 @@ button:active:not(:disabled) {
 }
 
 .sidebar-session-row > .runtime-status {
-  display: inline-flex;
-  overflow: visible;
+  overflow: hidden;
   flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
   max-width: 92px;
   color: color-mix(in srgb, var(--muted) 68%, transparent);
   font-size: 9px;
@@ -1666,41 +1663,17 @@ button:active:not(:disabled) {
   white-space: nowrap;
 }
 
-.runtime-status i {
-  width: 5px;
-  height: 5px;
+.sidebar-session-row > .runtime-loading-icon {
   flex: 0 0 auto;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.runtime-status.running {
   color: var(--accent);
-}
-
-.runtime-status.running i {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
-  animation: runtime-pulse 1.8s ease-in-out infinite;
 }
 
 .runtime-status-error {
   color: var(--danger);
 }
 
-.runtime-status-starting,
 .runtime-status.needs-input {
   color: var(--warning);
-}
-
-.runtime-status.needs-input i {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 14%, transparent);
-}
-
-@keyframes runtime-pulse {
-  50% {
-    opacity: 0.5;
-    transform: scale(0.82);
-  }
 }
 
 .sidebar-show-more {
