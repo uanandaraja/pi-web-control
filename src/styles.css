@@ -1750,6 +1750,7 @@ button:active:not(:disabled) {
     0 0 0 1px var(--line-strong),
     0 8px 22px -14px rgba(20, 20, 18, 0.34);
   grid-row: 3;
+  grid-column: 1;
   transition-property: color, background-color, scale;
   transition-duration: 140ms;
 }
