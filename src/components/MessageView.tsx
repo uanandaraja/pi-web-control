@@ -23,12 +23,8 @@ export function MessageView({ message, streaming }: MessageViewProps) {
         : [],
     )
     : [];
-  const hasThinking = !isUser && blocks.some((block) => block.type === "thinking");
   const time = formatMessageTime(message.timestamp);
 
-  if (streaming && hasThinking && text.length === 0) {
-    return <div className="thinking-status" role="status">Thinking...</div>;
-  }
   if (text.length === 0 && images.length === 0) return null;
 
   return (

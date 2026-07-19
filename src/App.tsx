@@ -1,4 +1,4 @@
-import { CircleNotch, List, Play, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowDown, CircleNotch, List, Play, WarningCircle, X } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Composer } from "./components/Composer";
 import { ExtensionDialog } from "./components/ExtensionDialog";
@@ -133,6 +133,11 @@ function hasVisibleAssistantText(message: AgentMessage): boolean {
   if (typeof message.content === "string") return message.content.trim().length > 0;
   if (!Array.isArray(message.content)) return false;
   return message.content.some((block) => block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0);
+}
+
+function hasVisibleAssistantOutput(message: AgentMessage): boolean {
+  if (hasVisibleAssistantText(message)) return true;
+  return Array.isArray(message.content) && message.content.some((block) => block.type === "toolCall");
 }
 
 function collapseLatestWork(entries: TimelineEntry[], fallbackCompletedAt = Date.now()): TimelineEntry[] {
@@ -297,6 +302,8 @@ export function App() {
   const [pendingSession, setPendingSession] = useState<PendingSessionOpen | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>(loadStoredWorkspaces);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [awaitingAssistant, setAwaitingAssistant] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [extensionRequest, setExtensionRequest] = useState<ExtensionRequest | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -417,7 +424,10 @@ export function App() {
       });
       if (workspace) setWorkspaces((current) => rememberWorkspace(current, workspace));
       if (event.status === "error") {
+        setAwaitingAssistant(false);
         setNotice({ tone: "error", message: eventString(event, "message") ?? "Pi failed to start" });
+      } else if (event.status === "stopped") {
+        setAwaitingAssistant(false);
       }
       return;
     }
@@ -443,6 +453,7 @@ export function App() {
         setBridge(runtime);
         setWorkspaces((current) => rememberWorkspace(current, runtime.workspace));
         setTimeline([]);
+        setAwaitingAssistant(false);
         setRpcState(null);
         setStats(null);
         setPendingSession(null);
@@ -517,7 +528,20 @@ export function App() {
       }
       if (event.command === "get_messages" && typeof data === "object" && data !== null && "messages" in data && Array.isArray(data.messages)) {
         if (awaitingSessionMessagesRef.current) scrollToBottomRef.current = true;
-        setTimeline(historyTimeline(data.messages.filter(isAgentMessage)));
+        const messages = data.messages.filter(isAgentMessage);
+        let latestUserIndex = -1;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index]?.role !== "user") continue;
+          latestUserIndex = index;
+          break;
+        }
+        const hasOutputAfterLatestPrompt = messages.slice(latestUserIndex + 1).some((message) =>
+          message.role === "toolResult" || (message.role === "assistant" && hasVisibleAssistantOutput(message)));
+        const activeRuntime = activeRuntimeIdRef.current
+          ? runtimesRef.current[activeRuntimeIdRef.current]
+          : undefined;
+        setAwaitingAssistant(Boolean(activeRuntime?.isStreaming) && !hasOutputAfterLatestPrompt);
+        setTimeline(historyTimeline(messages));
         if (awaitingSessionMessagesRef.current) {
           awaitingSessionMessagesRef.current = false;
           setPendingSession(null);
@@ -525,6 +549,7 @@ export function App() {
       }
       if (event.command === "new_session") {
         setTimeline([]);
+        setAwaitingAssistant(false);
         setStats(null);
         setFullSyncRevision((value) => value + 1);
       }
@@ -537,6 +562,7 @@ export function App() {
         } else {
           awaitingSessionMessagesRef.current = true;
           setTimeline([]);
+          setAwaitingAssistant(false);
           setStats(null);
           setFullSyncRevision((value) => value + 1);
         }
@@ -544,10 +570,12 @@ export function App() {
       return;
     }
     if (event.type === "agent_start") {
+      setAwaitingAssistant(true);
       setRpcState((state) => state ? { ...state, isStreaming: true } : state);
       return;
     }
     if (event.type === "agent_settled") {
+      setAwaitingAssistant(false);
       setRpcState((state) => state ? { ...state, isStreaming: false } : state);
       setTimeline((entries) => collapseLatestWork(entries));
       setSyncRevision((value) => value + 1);
@@ -556,6 +584,7 @@ export function App() {
     if (event.type === "message_start" || event.type === "message_update" || event.type === "message_end") {
       const agentMessage = event.message;
       if (isAgentMessage(agentMessage) && (agentMessage.role === "user" || agentMessage.role === "assistant")) {
+        if (agentMessage.role === "assistant" && hasVisibleAssistantText(agentMessage)) setAwaitingAssistant(false);
         setTimeline((entries) => upsertMessage(entries, agentMessage, event.type !== "message_end" && agentMessage.role === "assistant"));
       }
       return;
@@ -564,6 +593,7 @@ export function App() {
       const id = eventString(event, "toolCallId");
       const name = eventString(event, "toolName");
       if (id && name) {
+        setAwaitingAssistant(false);
         setTimeline((entries) => upsertTool(entries, {
           id,
           name,
@@ -677,8 +707,23 @@ export function App() {
     if (forceBottom || nearBottom) {
       feed.scrollTo({ top: feed.scrollHeight, behavior: forceBottom || rpcState?.isStreaming ? "instant" : "smooth" });
       scrollToBottomRef.current = false;
+      setShowScrollToBottom(false);
+    } else {
+      setShowScrollToBottom(true);
     }
-  }, [rpcState?.isStreaming, timeline]);
+  }, [awaitingAssistant, rpcState?.isStreaming, timeline]);
+
+  function updateScrollToBottom(): void {
+    const feed = feedRef.current;
+    if (!feed) return;
+    setShowScrollToBottom(feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 120);
+  }
+
+  function scrollToBottom(): void {
+    const feed = feedRef.current;
+    if (!feed) return;
+    feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
+  }
 
   function authenticate(event: React.FormEvent): void {
     event.preventDefault();
@@ -697,6 +742,7 @@ export function App() {
     setActiveRuntimeId(runtimeId);
     setBridge(runtime);
     setTimeline([]);
+    setAwaitingAssistant(runtime.isStreaming);
     setRpcState(null);
     setStats(null);
     setExtensionRequest(isExtensionRequest(runtime.pendingUiRequest) ? runtime.pendingUiRequest : null);
@@ -816,7 +862,7 @@ export function App() {
           </div>
         ) : null}
 
-        <div className="feed" ref={feedRef}>
+        <div className="feed" ref={feedRef} onScroll={updateScrollToBottom}>
           {pendingSession ? (
             <div className="session-opening-status" role="status">
               <CircleNotch className="spin" size={15} />
@@ -824,7 +870,7 @@ export function App() {
             </div>
           ) : null}
           <div className="feed-inner">
-            {timeline.length === 0 ? (
+            {timeline.length === 0 && !awaitingAssistant ? (
               <section className="empty-state">
                 <h1>Let&apos;s lock in.</h1>
                 <p>What are we doing here?</p>
@@ -851,8 +897,20 @@ export function App() {
                 ),
               )
             )}
+            {awaitingAssistant ? (
+              <div className="working-status" role="status" aria-live="polite">
+                <CircleNotch className="spin" size={14} />
+                <span>Working…</span>
+              </div>
+            ) : null}
           </div>
         </div>
+
+        {showScrollToBottom ? (
+          <button className="scroll-to-bottom" type="button" onClick={scrollToBottom} aria-label="Scroll to latest message">
+            <ArrowDown size={15} weight="bold" />
+          </button>
+        ) : null}
 
         <Composer
           disabled={!canSend}
@@ -860,15 +918,22 @@ export function App() {
           models={availableModels}
           model={rpcState?.model ?? null}
           thinkingLevel={rpcState?.thinkingLevel ?? "off"}
-          onSend={({ message, images, files }: PromptSubmission) => sendRuntime({
-            id: crypto.randomUUID(),
-            type: "prompt",
-            message,
-            ...(images.length > 0 ? { images } : {}),
-            ...(files.length > 0 ? { files } : {}),
-            ...(rpcState?.isStreaming ? { streamingBehavior: "steer" } : {}),
-          })}
-          onAbort={() => sendRuntime({ id: crypto.randomUUID(), type: "abort" })}
+          onSend={({ message, images, files }: PromptSubmission) => {
+            const sent = sendRuntime({
+              id: crypto.randomUUID(),
+              type: "prompt",
+              message,
+              ...(images.length > 0 ? { images } : {}),
+              ...(files.length > 0 ? { files } : {}),
+              ...(rpcState?.isStreaming ? { streamingBehavior: "steer" } : {}),
+            });
+            if (sent) setAwaitingAssistant(true);
+            return sent;
+          }}
+          onAbort={() => {
+            setAwaitingAssistant(false);
+            return sendRuntime({ id: crypto.randomUUID(), type: "abort" });
+          }}
           onModelChange={(model) => {
             setRpcState((state) => state ? { ...state, model } : state);
             sendRuntime({ id: crypto.randomUUID(), type: "set_model", provider: model.provider, modelId: model.id });
