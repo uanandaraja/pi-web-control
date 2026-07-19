@@ -11,6 +11,11 @@ export function MarkdownContent({ children }: { children: string }) {
             {linkChildren}
           </a>
         ),
+        table: ({ children: tableChildren, node: _node, ...props }) => (
+          <div className="markdown-table-scroll" role="region" aria-label="Scrollable table" tabIndex={0}>
+            <table {...props}>{tableChildren}</table>
+          </div>
+        ),
       }}
     >
       {children}
