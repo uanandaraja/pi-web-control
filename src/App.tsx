@@ -862,7 +862,8 @@ export function App() {
           </div>
         ) : null}
 
-        <div className="feed" ref={feedRef} onScroll={updateScrollToBottom}>
+        <div className="feed-shell">
+          <div className="feed" ref={feedRef} onScroll={updateScrollToBottom}>
           {pendingSession ? (
             <div className="session-opening-status" role="status">
               <CircleNotch className="spin" size={15} />
@@ -903,14 +904,15 @@ export function App() {
                 <span>Working…</span>
               </div>
             ) : null}
+            </div>
           </div>
-        </div>
 
-        {showScrollToBottom ? (
-          <button className="scroll-to-bottom" type="button" onClick={scrollToBottom} aria-label="Scroll to latest message">
-            <ArrowDown size={15} weight="bold" />
-          </button>
-        ) : null}
+          {showScrollToBottom ? (
+            <button className="scroll-to-bottom" type="button" onClick={scrollToBottom} aria-label="Scroll to latest message">
+              <ArrowDown size={15} weight="bold" />
+            </button>
+          ) : null}
+        </div>
 
         <Composer
           disabled={!canSend}
